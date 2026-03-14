@@ -1,6 +1,8 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 from backend.config import SESSIONS_DIR
 from backend.routes.session import router as session_router
 from backend.routes.upload import router as upload_router
@@ -18,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 # Allow redirect slashes so /upload/template/ can be redirected to /upload/template
 app = FastAPI(title="CertGen API", redirect_slashes=True)
+
+# Serve uploaded fonts
+app.mount(
+    "/static/fonts",
+    StaticFiles(directory="backend/fonts"),
+    name="fonts",
+)
 
 app.add_middleware(
     CORSMiddleware,

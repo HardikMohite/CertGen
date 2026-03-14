@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+/* eslint-disable react/prop-types */
+/* eslint-disable jsx-a11y/no-static-element-interactions */
+/* eslint-disable jsx-a11y/click-events-have-key-events */
+
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 const HANDLE_SIZE = 10; // px (visual)
 const MIN_W = 20;
@@ -16,17 +20,21 @@ function normRect(x1, y1, x2, y2) {
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-export default function CanvasEditor({
+function CanvasEditor({
   templateUrl,
-  onTextAreaChange, // NEW: (rectPx, imageSize) => void
+  onTextAreaChange,
+  // Placement-only props
+  anchor = "center", // left | center | right
+  showAnchorGuide = true,
 }) {
   const containerRef = useRef(null);
   const imgRef = useRef(null);
+  const rafRef = useRef(null);
 
   const [imgSize, setImgSize] = useState({ width: 0, height: 0 });
 
   // rect in DISPLAY coords (relative to container)
-  const [rect, setRect] = useState(null); // { x,y,width,height }
+  const [rect, setRect] = useState(null);
   const [mode, setMode] = useState("idle"); // idle | drawing | moving | resizing
   const [resizeCorner, setResizeCorner] = useState(null); // tl | tr | bl | br
   const [start, setStart] = useState(null); // { x,y } start mouse
@@ -37,7 +45,8 @@ export default function CanvasEditor({
   useEffect(() => {
     if (!templateUrl) return;
     const img = new Image();
-    img.onload = () => setImgSize({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onload = () =>
+      setImgSize({ width: img.naturalWidth, height: img.naturalHeight });
     img.src = templateUrl;
   }, [templateUrl]);
 
@@ -145,7 +154,7 @@ export default function CanvasEditor({
     beginDraw(mx, my);
   };
 
-  const onMouseMove = (e) => {
+  const processMouseMove = (e) => {
     const r = getContainerRect();
     if (!r) return;
 
@@ -154,7 +163,7 @@ export default function CanvasEditor({
 
     if (mode === "drawing" && start) {
       const next = normRect(start.x, start.y, mx, my);
-      const bounded = boundRect(next, r.width, r.height);
+      const bounded = boundRect(next, r.width, r.height, true);
       setRect(bounded);
       updateGuides(bounded);
       emit(bounded);
@@ -164,7 +173,7 @@ export default function CanvasEditor({
       const dx = mx - start.x;
       const dy = my - start.y;
       const next = { ...startRect, x: startRect.x + dx, y: startRect.y + dy };
-      const bounded = boundRect(next, r.width, r.height);
+      const bounded = boundRect(next, r.width, r.height, true);
       setRect(bounded);
       updateGuides(bounded);
       emit(bounded);
@@ -179,7 +188,22 @@ export default function CanvasEditor({
     }
   };
 
+  const onMouseMove = (e) => {
+    if (mode === "idle") return;
+
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      processMouseMove(e);
+    });
+  };
+
   const onMouseUp = () => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+
     if (mode === "drawing" && rect) {
       // finalize minimum size
       const fixed = {
@@ -190,6 +214,7 @@ export default function CanvasEditor({
       setRect(fixed);
       emit(fixed);
     }
+
     setMode("idle");
     setResizeCorner(null);
     setStart(null);
@@ -201,11 +226,11 @@ export default function CanvasEditor({
   useEffect(() => {
     if (mode === "idle") return;
 
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    globalThis.addEventListener("mousemove", onMouseMove);
+    globalThis.addEventListener("mouseup", onMouseUp);
     return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+      globalThis.removeEventListener("mousemove", onMouseMove);
+      globalThis.removeEventListener("mouseup", onMouseUp);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, start, startRect, rect, resizeCorner, imgSize.width, imgSize.height]);
@@ -229,36 +254,18 @@ export default function CanvasEditor({
       if (e.key === "ArrowUp") ny -= step;
       if (e.key === "ArrowDown") ny += step;
 
-      const next = boundRect({ ...rect, x: nx, y: ny }, r.width, r.height);
+      const next = boundRect({ ...rect, x: nx, y: ny }, r.width, r.height, true);
       setRect(next);
       updateGuides(next);
       emit(next);
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    globalThis.addEventListener("keydown", onKeyDown);
+    return () => globalThis.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rect, imgSize.width, imgSize.height]);
 
-  const handleStyles = (corner) => {
-    const base =
-      "absolute w-2.5 h-2.5 bg-white border border-gray-400 shadow-sm";
-    const half = HANDLE_SIZE / 2;
-
-    if (!rect) return { className: base, style: {} };
-    const x1 = rect.x;
-    const y1 = rect.y;
-    const x2 = rect.x + rect.width;
-    const y2 = rect.y + rect.height;
-
-    if (corner === "tl") return { className: base, style: { left: x1 - half, top: y1 - half, cursor: "nwse-resize" } };
-    if (corner === "tr") return { className: base, style: { left: x2 - half, top: y1 - half, cursor: "nesw-resize" } };
-    if (corner === "bl") return { className: base, style: { left: x1 - half, top: y2 - half, cursor: "nesw-resize" } };
-    return { className: base, style: { left: x2 - half, top: y2 - half, cursor: "nwse-resize" } };
-  };
-
   // Allow parent to drive rect via image-pixel inputs (coord panel)
-  // Expose an imperative sync using a custom event (minimal change, avoids rewriting component tree)
   useEffect(() => {
     const onSync = (ev) => {
       const payload = ev.detail;
@@ -282,10 +289,57 @@ export default function CanvasEditor({
       emit(next);
     };
 
-    window.addEventListener("certgen:textAreaSync", onSync);
-    return () => window.removeEventListener("certgen:textAreaSync", onSync);
+    globalThis.addEventListener("certgen:textAreaSync", onSync);
+    return () => globalThis.removeEventListener("certgen:textAreaSync", onSync);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgSize.width, imgSize.height]);
+
+  const anchorLineLeft = useMemo(() => {
+    if (!rect) return 0;
+    if (anchor === "left") return 0;
+    if (anchor === "right") return rect.width;
+    return rect.width / 2;
+  }, [anchor, rect]);
+
+  const handleStyles = (corner) => {
+    const base = "absolute bg-white border border-emerald-600 rounded-sm shadow-sm";
+    const half = HANDLE_SIZE / 2;
+
+    const style = {
+      width: HANDLE_SIZE,
+      height: HANDLE_SIZE,
+      marginLeft: -half,
+      marginTop: -half,
+    };
+
+    if (corner === "tl") {
+      return {
+        className: base + " cursor-nwse-resize",
+        style: { ...style, left: 0, top: 0 },
+      };
+    }
+    if (corner === "tr") {
+      return {
+        className: base + " cursor-nesw-resize",
+        style: { ...style, left: "100%", top: 0 },
+      };
+    }
+    if (corner === "bl") {
+      return {
+        className: base + " cursor-nesw-resize",
+        style: { ...style, left: 0, top: "100%" },
+      };
+    }
+    return {
+      className: base + " cursor-nwse-resize",
+      style: { ...style, left: "100%", top: "100%" },
+    };
+  };
+
+  let cursor = "crosshair";
+  if (mode === "moving") cursor = "grabbing";
+  else if (mode === "resizing") cursor = "nwse-resize";
+  else if (rect) cursor = "move";
 
   return (
     <div className="flex flex-col gap-2">
@@ -295,8 +349,9 @@ export default function CanvasEditor({
 
       <div
         ref={containerRef}
-        className="relative w-full cursor-crosshair border border-gray-200 rounded-lg overflow-hidden bg-white select-none"
+        className="relative w-full border border-gray-200 rounded-lg overflow-hidden bg-white select-none"
         onMouseDown={onMouseDown}
+        style={{ cursor }}
       >
         <img
           ref={imgRef}
@@ -317,15 +372,23 @@ export default function CanvasEditor({
         {/* Selection rectangle */}
         {rect ? (
           <div
-            className="absolute border-2 border-blue-500 border-dashed bg-blue-200/20"
+            className="absolute border-2 border-emerald-600 bg-emerald-200/10"
             style={{
               left: rect.x,
               top: rect.y,
               width: rect.width,
               height: rect.height,
-              cursor: mode === "moving" ? "grabbing" : "grab",
+              boxShadow: "0 0 0 0 rgba(0,0,0,0)",
             }}
           >
+            {/* Optional anchor guide */}
+            {showAnchorGuide ? (
+              <div
+                className="absolute -top-5 -bottom-5 w-px bg-emerald-600/70"
+                style={{ left: anchorLineLeft }}
+              />
+            ) : null}
+
             {/* Resize handles (corners) */}
             {["tl", "tr", "bl", "br"].map((c) => {
               const { className, style } = handleStyles(c);
@@ -353,6 +416,8 @@ export default function CanvasEditor({
   );
 }
 
+export default memo(CanvasEditor);
+
 function boundRect(r, maxW, maxH, allowSmall = false) {
   const w = allowSmall ? Math.max(1, r.width) : Math.max(MIN_W, r.width);
   const h = allowSmall ? Math.max(1, r.height) : Math.max(MIN_H, r.height);
@@ -375,7 +440,12 @@ function hitTestHandle(mx, my, rect) {
 
   for (const k of Object.keys(corners)) {
     const c = corners[k];
-    if (mx >= c.x - half && mx <= c.x + half && my >= c.y - half && my <= c.y + half) {
+    if (
+      mx >= c.x - half &&
+      mx <= c.x + half &&
+      my >= c.y - half &&
+      my <= c.y + half
+    ) {
       return k;
     }
   }

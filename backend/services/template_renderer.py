@@ -21,10 +21,34 @@ def _load_image(template_path: str) -> Image.Image:
     return Image.open(template_path).convert("RGBA")
 
 
+def _resolve_font_path(font_path: str) -> str:
+    """Convert public URL paths to filesystem paths for Pillow."""
+    if not font_path:
+        return font_path
+
+    if font_path.startswith("/static/fonts/"):
+        # Map URL path -> repo path
+        # /static/fonts/<rel> => backend/fonts/<rel>
+        rel = font_path[len("/static/fonts/"):].lstrip("/")
+        return os.path.join("backend", "fonts", *rel.split("/"))
+
+    return font_path
+
+
 def _get_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
+    resolved = _resolve_font_path(font_path)
+
+    if not resolved or not os.path.exists(resolved):
+        # Missing file - fallback
+        if resolved:
+            print(f"[template_renderer] Font file missing: {resolved}")
+        return ImageFont.load_default()
+
     try:
-        return ImageFont.truetype(font_path, size)
-    except Exception:
+        print(f"[template_renderer] Using font: {resolved} size={int(size)}")
+        return ImageFont.truetype(resolved, int(size))
+    except Exception as e:
+        print(f"[template_renderer] Failed to load font '{resolved}': {e}")
         return ImageFont.load_default()
 
 
@@ -127,7 +151,7 @@ def render_preview(template_path: str,
                    output_path: str,
                    bold: bool = False,
                    italic: bool = False) -> None:
-    # bold/italic ignored for now (kept for API compatibility)
+    _ = (bold, italic)  # kept for API compatibility
     img = _load_image(template_path).copy()
     img = _draw_name(img, name, x_percent, y_percent, text_area, font_path, font_size, font_color)
     img.convert("RGB").save(output_path, "PNG")
@@ -145,6 +169,7 @@ def render_certificate(template_path: str,
                        output_format: str = "png",
                        bold: bool = False,
                        italic: bool = False) -> None:
+    _ = (bold, italic)  # kept for API compatibility
     img = _load_image(template_path).copy()
     img = _draw_name(img, name, x_percent, y_percent, text_area, font_path, font_size, font_color)
 

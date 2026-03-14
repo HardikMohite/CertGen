@@ -1,54 +1,121 @@
 import os
-from fastapi import APIRouter, Query
+from pathlib import Path
 
-router = APIRouter()
+from fastapi import APIRouter
 
-FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
+try:
+    # Optional legacy catalog
+    from backend.config import FONT_CATALOG  # type: ignore
+except Exception:
+    FONT_CATALOG = []
 
-FONT_CATALOG = [
-    {"label": "Arial", "file": "arial.ttf"},
-    {"label": "Arial Bold", "file": "arial_bold.ttf"},
-    {"label": "Times New Roman", "file": "times.ttf"},
-    {"label": "Times New Roman Bold", "file": "times_bold.ttf"},
-    {"label": "Georgia", "file": "georgia.ttf"},
-    {"label": "Georgia Bold", "file": "georgia_bold.ttf"},
-    {"label": "Verdana", "file": "verdana.ttf"},
-    {"label": "Verdana Bold", "file": "verdana_bold.ttf"},
-    {"label": "Trebuchet MS", "file": "trebuchet.ttf"},
-    {"label": "Trebuchet MS Bold", "file": "trebuchet_bold.ttf"},
-]
+router = APIRouter(tags=["fonts"])
+
+FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fonts")
 
 
-def _normalize(p: str) -> str:
-    return p.replace("\\", "/")
+def _style_label(style: str) -> str:
+    return {
+        "regular": "Regular",
+        "bold": "Bold",
+        "italic": "Italic",
+        "bold_italic": "Bold Italic",
+    }.get(style, style)
+
+
+def _detect_style_from_stem(stem: str) -> str:
+    s = (stem or "").lower().replace("-", "").replace("_", "")
+    if s in ("bolditalic", "boldital", "bold_italic") or ("bold" in s and "italic" in s):
+        return "bold_italic"
+    if "bold" in s:
+        return "bold"
+    if "italic" in s or "oblique" in s:
+        return "italic"
+    if "regular" in s:
+        return "regular"
+    return "regular"
+
+
+def _catalog_fonts() -> list[dict]:
+    out: list[dict] = []
+    for font in FONT_CATALOG or []:
+        file = font.get("file")
+        if not file:
+            continue
+        family = os.path.splitext(os.path.basename(file))[0]
+        out.append(
+            {
+                "family": family,
+                "style": "regular",
+                "path": f"/static/fonts/{file}",
+                "label": font.get("label") or f"{family} (Regular)",
+                "source": "built-in",
+                # backward-compat keys
+                "file": file,
+            }
+        )
+    return out
+
+
+def _uploaded_fonts() -> list[dict]:
+    out: list[dict] = []
+    root = Path(FONTS_DIR)
+    if not root.exists():
+        return out
+
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".ttf", ".otf"):
+            continue
+
+        try:
+            rel = p.relative_to(root)
+        except ValueError:
+            continue
+
+        rel_parts = rel.parts
+
+        # Expected: <Family>/<style>.ttf
+        if len(rel_parts) >= 2:
+            family = rel_parts[0]
+            style = _detect_style_from_stem(p.stem)
+        else:
+            # legacy: fonts dropped directly into backend/fonts
+            family = p.stem
+            style = "regular"
+
+        rel_posix = str(rel).replace("\\", "/")
+        label = f"{family} ({_style_label(style)})"
+
+        out.append(
+            {
+                "family": family,
+                "style": style,
+                "path": f"/static/fonts/{rel_posix}",
+                "label": label,
+                "source": "uploaded",
+                # backward-compat keys
+                "file": rel_posix,
+            }
+        )
+
+    return out
+
+
+def _dedupe_by_path(fonts: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for f in fonts:
+        path = f.get("path")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(f)
+    return deduped
 
 
 @router.get("/fonts")
-def list_fonts(session_id: str | None = Query(default=None)):
-    available = []
-
-    for font in FONT_CATALOG:
-        full_path = os.path.join(FONTS_DIR, font["file"])
-        if os.path.isfile(full_path):
-            available.append({
-                "label": font["label"],
-                "file": font["file"],
-                "path": _normalize(full_path),
-                "source": "system",
-            })
-
-    if session_id:
-        from backend.config import SESSIONS_DIR
-        session_fonts_dir = os.path.join(SESSIONS_DIR, session_id, "fonts")
-        if os.path.isdir(session_fonts_dir):
-            for fname in os.listdir(session_fonts_dir):
-                if not fname.lower().endswith((".ttf", ".otf")):
-                    continue
-                available.append({
-                    "label": os.path.splitext(fname)[0],
-                    "file": fname,
-                    "path": _normalize(os.path.join(session_fonts_dir, fname)),
-                    "source": "uploaded",
-                })
-
-    return {"fonts": available}
+async def list_fonts():
+    fonts = _catalog_fonts() + _uploaded_fonts()
+    return _dedupe_by_path(fonts)

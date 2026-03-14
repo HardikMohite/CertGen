@@ -12,6 +12,7 @@ export default defineConfig({
       "/generate": "http://127.0.0.1:8000",
       "/download": "http://127.0.0.1:8000",
       "/fonts": "http://127.0.0.1:8000",
+      "/static/fonts": "http://127.0.0.1:8000",
     },
   },
 });

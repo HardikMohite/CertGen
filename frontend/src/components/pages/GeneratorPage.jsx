@@ -1,3 +1,4 @@
+// eslint-disable complexity
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
@@ -28,6 +29,8 @@ import {
 
 import CanvasEditor from "../editor/CanvasEditor";
 import { pixelToPercent } from "../../utils/coordinateUtils";
+import { loadFont } from "../../utils/fontLoader";
+import { mapFontsByFamily, resolveFontUrl } from "../../utils/fontMapper";
 
 const ACCEPT_TEMPLATE = {
   "application/pdf": [".pdf"],
@@ -40,6 +43,7 @@ const ACCEPT_FONT = {
   "font/otf": [".otf"],
   "application/x-font-ttf": [".ttf"],
   "application/x-font-opentype": [".otf"],
+  "application/zip": [".zip"],
 };
 
 function isSessionNotFound(err) {
@@ -51,6 +55,38 @@ function isSessionNotFound(err) {
   );
 }
 
+function safeReload() {
+  globalThis.location?.reload?.();
+}
+
+function pickDefaultFamily(fontMap) {
+  if (fontMap?.Georgia?.regular) return "Georgia";
+  const families = Object.keys(fontMap || {});
+  return families[0] || "Georgia";
+}
+
+function preloadRegularFonts(fontMap) {
+  const families = Object.keys(fontMap || {});
+  return Promise.all(
+    families.map(async (fam) => {
+      const url = fontMap?.[fam]?.regular;
+      if (!url) return;
+      try {
+        await loadFont(fam, url);
+      } catch {
+        // ignore
+      }
+    })
+  );
+}
+
+function formatError(prefix, err, fallback) {
+  const detail = err?.response?.data?.detail;
+  if (detail) return `${prefix}: ${detail}`;
+  return fallback;
+}
+
+// eslint-disable-next-line sonarjs/cognitive-complexity
 export default function GeneratorPage() {
   const { sessionId, loading: sessionLoading, error: sessionError } = useSession();
 
@@ -58,45 +94,109 @@ export default function GeneratorPage() {
   const [csvFile, setCsvFile] = useState(null);
   const [fontFile, setFontFile] = useState(null);
 
-  const [templateUrl, setTemplateUrl] = useState(null);
-  const [textArea, setTextArea] = useState(null); // { x,y,width,height } in IMAGE px
-  const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
-
-  const [fonts, setFonts] = useState([]);
-  const [selectedFont, setSelectedFont] = useState(null);
-
-  const [bold, setBold] = useState(false);
-  const [italic, setItalic] = useState(false);
-  const [fontSize, setFontSize] = useState(48);
-  const [fontColor, setFontColor] = useState("#4266DE");
-  const [outputFormat, setOutputFormat] = useState("png");
-
+  // Missing core UI state
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [generated, setGenerated] = useState(false);
   const [certTotal, setCertTotal] = useState(0);
 
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
+  // Output expected by backend
+  const [outputFormat, setOutputFormat] = useState("png");
 
-  // Cleanup blob/object URLs safely
-  useEffect(() => {
-    if (!templateUrl?.startsWith("blob:")) return;
-    return () => URL.revokeObjectURL(templateUrl);
-  }, [templateUrl]);
+  const [templateUrl, setTemplateUrl] = useState(null);
+  const [textArea, setTextArea] = useState(null); // { x,y,width,height } in IMAGE px
+  const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
 
-  useEffect(() => {
-    if (!previewUrl?.startsWith("blob:")) return;
-    return () => URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
+  // Font state (must be declared before any derived logic)
+  const [fonts, setFonts] = useState([]);
 
-  useEffect(() => {
-    refreshFonts()
-      .then((list) => {
-        setFonts(list);
-        setSelectedFont((curr) => curr ?? (list.length > 0 ? list[0] : null));
-      })
-      .catch(() => setFonts([]));
+  const [fontFamily, setFontFamily] = useState("Georgia");
+  const [fontWeight, setFontWeight] = useState("normal");
+  const [fontStyle, setFontStyle] = useState("normal");
+
+  const [fontSize, setFontSize] = useState(48);
+  const [fontColor, setFontColor] = useState("#4266DE");
+
+  // Derived toggles expected by backend
+  const bold = fontWeight === "bold";
+  const italic = fontStyle === "italic";
+
+  // Text anchor (frontend positioning)
+  const [textAnchor, setTextAnchor] = useState("center"); // left | center | right
+
+  // Optional sample value used only for on-canvas preview overlay
+  const previewName = useMemo(() => {
+    // Use quick sample; avoids CSV parsing changes.
+    return "ALEXANDER CHRISTOPHER WILLIAMSON";
   }, []);
+
+  const fontMap = useMemo(() => mapFontsByFamily(fonts), [fonts]);
+
+  const resolvedFontUrl = useMemo(() => {
+    return resolveFontUrl(fontMap, fontFamily, fontWeight, fontStyle);
+  }, [fontMap, fontFamily, fontWeight, fontStyle]);
+
+  const fontPathForBackend = resolvedFontUrl || "";
+
+  const effectiveFontFamily = fontFamily || "Georgia";
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const list = await refreshFonts();
+        if (cancelled) return;
+
+        const validList = (list || []).filter((f) => {
+          const p = String(f?.path || "").toLowerCase();
+          return p.endsWith(".ttf") || p.endsWith(".otf");
+        });
+
+        setFonts(validList);
+
+        const byFamily = mapFontsByFamily(validList);
+
+        setFontFamily((curr) => {
+          if (curr && byFamily[curr]?.regular) return curr;
+          return pickDefaultFamily(byFamily);
+        });
+
+        await preloadRegularFonts(byFamily);
+      } catch {
+        if (!cancelled) setFonts([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load exact style when selection changes
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const url = resolvedFontUrl;
+      if (!url) return;
+      try {
+        await loadFont(effectiveFontFamily, url);
+      } catch {
+        if (cancelled) return;
+
+        // Fallback to Georgia
+        setFontFamily("Georgia");
+        setFontWeight("normal");
+        setFontStyle("normal");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedFontUrl, effectiveFontFamily]);
 
   const canPlace = Boolean(templateUrl);
   const canStyle = Boolean(templateUrl);
@@ -113,19 +213,27 @@ export default function GeneratorPage() {
 
   const hasImageSize = Boolean(imageSize.width > 0 && imageSize.height > 0);
 
+  // Debug why Preview might be disabled
+  console.log("templateUrl:", templateUrl);
+  console.log("csvFile:", csvFile);
+  console.log("textArea:", textArea);
+  console.log("imageSize:", imageSize);
+  console.log("resolvedFontUrl:", resolvedFontUrl);
+
+  // Debug font mapping (expose for DevTools)
+  try {
+    globalThis.__certgenFontFamily = fontFamily;
+    globalThis.__certgenFontMapKeys = Object.keys(fontMap || {});
+  } catch {
+    // ignore
+  }
+  console.log("fontFamily:", fontFamily);
+  console.log("fontMap keys:", Object.keys(fontMap || {}));
+
   const canPreview = Boolean(
-    templateUrl &&
-      csvFile &&
-      hasTextArea &&
-      hasImageSize &&
-      selectedFont
+    templateUrl && csvFile && hasTextArea && hasImageSize && resolvedFontUrl
   );
   const canGenerate = canPreview;
-
-  const fontPathForBackend = useMemo(
-    () => selectedFont?.path || "",
-    [selectedFont]
-  );
 
   const resetAfterTemplateChange = () => {
     setGenerated(false);
@@ -152,19 +260,13 @@ export default function GeneratorPage() {
       setTemplateFile(file);
 
       const thumbRes = await getTemplateThumbnail(sessionId);
-      setTemplateUrl(URL.createObjectURL(thumbRes.data));
+      setTemplateUrl(globalThis.URL.createObjectURL(thumbRes.data));
     } catch (err) {
       if (!didRetry && isSessionNotFound(err)) {
-        // Session was cleared server-side; reload to establish a fresh session and retry once.
-        window.location.reload();
+        safeReload();
         return;
       }
-      const detail = err?.response?.data?.detail;
-      setError(
-        detail
-          ? `Template upload failed: ${detail}`
-          : "Template upload failed."
-      );
+      setError(formatError("Template upload failed", err, "Template upload failed."));
     } finally {
       setBusy(false);
     }
@@ -187,11 +289,10 @@ export default function GeneratorPage() {
       setCsvFile(file);
     } catch (err) {
       if (!didRetry && isSessionNotFound(err)) {
-        window.location.reload();
+        safeReload();
         return;
       }
-      const detail = err?.response?.data?.detail;
-      setError(detail ? `CSV upload failed: ${detail}` : "CSV upload failed.");
+      setError(formatError("CSV upload failed", err, "CSV upload failed."));
     } finally {
       setBusy(false);
     }
@@ -211,17 +312,27 @@ export default function GeneratorPage() {
       setFontFile(file);
 
       const list = await refreshFonts();
-      setFonts(list);
+      const validList = (list || []).filter((f) => {
+        const p = String(f?.path || "").toLowerCase();
+        return p.endsWith(".ttf") || p.endsWith(".otf");
+      });
 
-      const newest = list[list.length - 1];
-      if (newest) setSelectedFont(newest);
+      setFonts(validList);
+
+      const byFamily = mapFontsByFamily(validList);
+      const families = Object.keys(byFamily);
+
+      const last = families.at(-1);
+      const nextFamily = last && byFamily[last]?.regular ? last : effectiveFontFamily;
+      setFontFamily(nextFamily || pickDefaultFamily(byFamily));
+
+      await preloadRegularFonts(byFamily);
     } catch (err) {
       if (!didRetry && isSessionNotFound(err)) {
-        window.location.reload();
+        safeReload();
         return;
       }
-      const detail = err?.response?.data?.detail;
-      setError(detail ? `Font upload failed: ${detail}` : "Font upload failed.");
+      setError(formatError("Font upload failed", err, "Font upload failed."));
     } finally {
       setBusy(false);
     }
@@ -268,10 +379,9 @@ export default function GeneratorPage() {
     setBusy(true);
     try {
       const res = await previewCertificate(payload);
-      setPreviewUrl(URL.createObjectURL(res.data));
+      setPreviewUrl(globalThis.URL.createObjectURL(res.data));
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      setError(detail ? `Preview failed: ${detail}` : "Preview failed.");
+      setError(formatError("Preview failed", err, "Preview failed."));
     } finally {
       setBusy(false);
     }
@@ -289,8 +399,7 @@ export default function GeneratorPage() {
       setGenerated(true);
       setCertTotal(res.data?.total ?? 0);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      setError(detail ? `Generate failed: ${detail}` : "Generate failed.");
+      setError(formatError("Generate failed", err, "Generate failed."));
     } finally {
       setBusy(false);
     }
@@ -307,17 +416,16 @@ export default function GeneratorPage() {
         type: res.headers?.["content-type"] || "application/zip",
       });
 
-      const url = URL.createObjectURL(blob);
+      const url = globalThis.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = "certificates.zip";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      globalThis.URL.revokeObjectURL(url);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      setError(detail ? `Download failed: ${detail}` : "Download failed.");
+      setError(formatError("Download failed", err, "Download failed."));
     } finally {
       setBusy(false);
     }
@@ -392,6 +500,8 @@ export default function GeneratorPage() {
                   setTextArea(areaPx);
                   setImageSize(size);
                 }}
+                anchor={textAnchor}
+                showAnchorGuide
               />
 
               {textArea ? (
@@ -402,15 +512,16 @@ export default function GeneratorPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <label className="text-xs font-semibold text-gray-600">
-                        X
+                        <span className="block">X</span>
                         <input
                           type="number"
                           value={Math.round(textArea.x)}
                           onChange={(e) => {
+                            // X
                             const x = Number(e.target.value);
-                            const next = { ...textArea, x: isNaN(x) ? 0 : x };
+                            const next = { ...textArea, x: Number.isNaN(x) ? 0 : x };
                             setTextArea(next);
-                            window.dispatchEvent(
+                            globalThis.dispatchEvent(
                               new CustomEvent("certgen:textAreaSync", { detail: next })
                             );
                           }}
@@ -419,15 +530,16 @@ export default function GeneratorPage() {
                       </label>
 
                       <label className="text-xs font-semibold text-gray-600">
-                        Y
+                        <span className="block">Y</span>
                         <input
                           type="number"
                           value={Math.round(textArea.y)}
                           onChange={(e) => {
+                            // Y
                             const y = Number(e.target.value);
-                            const next = { ...textArea, y: isNaN(y) ? 0 : y };
+                            const next = { ...textArea, y: Number.isNaN(y) ? 0 : y };
                             setTextArea(next);
-                            window.dispatchEvent(
+                            globalThis.dispatchEvent(
                               new CustomEvent("certgen:textAreaSync", { detail: next })
                             );
                           }}
@@ -443,18 +555,19 @@ export default function GeneratorPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <label className="text-xs font-semibold text-gray-600">
-                        Width
+                        <span className="block">Width</span>
                         <input
                           type="number"
                           value={Math.round(textArea.width)}
                           onChange={(e) => {
+                            // Width
                             const width = Number(e.target.value);
                             const next = {
                               ...textArea,
-                              width: isNaN(width) ? 1 : Math.max(1, width),
+                              width: Number.isNaN(width) ? 1 : Math.max(1, width),
                             };
                             setTextArea(next);
-                            window.dispatchEvent(
+                            globalThis.dispatchEvent(
                               new CustomEvent("certgen:textAreaSync", { detail: next })
                             );
                           }}
@@ -463,18 +576,19 @@ export default function GeneratorPage() {
                       </label>
 
                       <label className="text-xs font-semibold text-gray-600">
-                        Height
+                        <span className="block">Height</span>
                         <input
                           type="number"
                           value={Math.round(textArea.height)}
                           onChange={(e) => {
+                            // Height
                             const height = Number(e.target.value);
                             const next = {
                               ...textArea,
-                              height: isNaN(height) ? 1 : Math.max(1, height),
+                              height: Number.isNaN(height) ? 1 : Math.max(1, height),
                             };
                             setTextArea(next);
-                            window.dispatchEvent(
+                            globalThis.dispatchEvent(
                               new CustomEvent("certgen:textAreaSync", { detail: next })
                             );
                           }}
@@ -505,23 +619,36 @@ export default function GeneratorPage() {
           <div className="flex items-center gap-2">
             <div className="text-sm font-semibold text-gray-700">Font</div>
             <select
-              value={selectedFont?.file ?? ""}
+              value={effectiveFontFamily}
               onChange={(e) => {
-                const next = fonts.find((f) => f.file === e.target.value);
-                if (next) setSelectedFont(next);
+                setFontFamily(e.target.value);
+                setFontWeight("normal");
+                setFontStyle("normal");
               }}
               disabled={!canStyle || busy}
               className="h-10 rounded-lg border border-gray-200 bg-white px-3 text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-emerald-500 transition-all duration-200"
             >
-              {fonts.map((f) => (
-                <option
-                  key={f.file}
-                  value={f.file}
-                  style={{ fontFamily: f.label }}
-                >
-                  {f.label}
+              {Object.keys(fontMap).map((fam) => (
+                <option key={fam} value={fam} style={{ fontFamily: fam }}>
+                  {fam}
                 </option>
               ))}
+              {fontMap?.Georgia ? null : <option value="Georgia">Georgia</option>}
+            </select>
+          </div>
+
+          {/* Anchor */}
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-gray-700">Alignment</div>
+            <select
+              value={textAnchor}
+              onChange={(e) => setTextAnchor(e.target.value)}
+              disabled={!canStyle || busy}
+              className="h-10 rounded-lg border border-gray-200 bg-white px-3 text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-emerald-500 transition-all duration-200"
+            >
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
             </select>
           </div>
 
@@ -530,11 +657,13 @@ export default function GeneratorPage() {
             type="button"
             className={
               "h-10 w-10 rounded-lg border border-gray-200 flex items-center justify-center transition-all duration-200 " +
-              (bold
+              (fontWeight === "bold"
                 ? "bg-gray-900 text-white"
                 : "bg-white hover:bg-gray-50 text-gray-900")
             }
-            onClick={() => setBold((b) => !b)}
+            onClick={() =>
+              setFontWeight((prev) => (prev === "bold" ? "normal" : "bold"))
+            }
             disabled={!canStyle || busy}
             aria-label="Bold"
             title="Bold"
@@ -546,11 +675,13 @@ export default function GeneratorPage() {
             type="button"
             className={
               "h-10 w-10 rounded-lg border border-gray-200 flex items-center justify-center transition-all duration-200 " +
-              (italic
+              (fontStyle === "italic"
                 ? "bg-gray-900 text-white"
                 : "bg-white hover:bg-gray-50 text-gray-900")
             }
-            onClick={() => setItalic((i) => !i)}
+            onClick={() =>
+              setFontStyle((prev) => (prev === "italic" ? "normal" : "italic"))
+            }
             disabled={!canStyle || busy}
             aria-label="Italic"
             title="Italic"

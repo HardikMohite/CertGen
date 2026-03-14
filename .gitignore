@@ -61,3 +61,6 @@ yarn-error.log*
 # Fonts — binaries not committed, only README tracked
 backend/fonts/*.ttf
 backend/fonts/*.otf
+
+# Session data
+sessions/

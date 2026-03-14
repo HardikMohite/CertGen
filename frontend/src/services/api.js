@@ -56,7 +56,16 @@ export const getFonts = () => api.get("/fonts");
 
 export const refreshFonts = async () => {
   const res = await getFonts();
-  return res.data?.fonts ?? [];
+  const data = res?.data;
+
+  // Backend returns a plain array: [{ family, style, path, ... }, ...]
+  if (Array.isArray(data)) return data;
+
+  // Back-compat with older shapes
+  if (Array.isArray(data?.fonts)) return data.fonts;
+  if (Array.isArray(data?.items)) return data.items;
+
+  return [];
 };
 
 export const getTemplateThumbnail = (sessionId) =>
